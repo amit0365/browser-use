@@ -86,3 +86,7 @@ class NoParamsAction(BaseModel):
 		# If you want to silently allow unknown fields at top-level,
 		# set extra = 'allow' as well:
 		extra = 'allow'
+
+class ReprocessDOMAction(BaseModel):
+    """Action to trigger DOM reprocessing"""
+    reprocess_dom: bool = True

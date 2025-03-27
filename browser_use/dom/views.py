@@ -1,9 +1,27 @@
+from __future__ import annotations
+
+import copy
+import json
+import logging
+import re
+from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 from functools import cached_property
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, Iterator, List, Optional, Set, TypeVar, Any, Union, TYPE_CHECKING
+
+from pydantic import BaseModel, Field, model_validator
 
 from browser_use.dom.history_tree_processor.view import CoordinateSet, HashedDomElement, ViewportInfo
 from browser_use.utils import time_execution_sync
+
+# Type aliases
+SelectorMap = Dict[int, 'DOMElementNode']
+
+class ClickableElements(BaseModel):
+	"""Container for element tree and selector map."""
+	element_tree: 'DOMBaseNode'
+	selector_map: SelectorMap
 
 # Avoid circular import issues
 if TYPE_CHECKING:
@@ -185,9 +203,6 @@ class DOMElementNode(DOMBaseNode):
 						return result
 
 		return None
-
-
-SelectorMap = dict[int, DOMElementNode]
 
 
 @dataclass

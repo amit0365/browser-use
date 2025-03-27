@@ -68,3 +68,7 @@ class ActionRegistry(BaseModel):
 	def get_prompt_description(self) -> str:
 		"""Get a description of all actions for the prompt"""
 		return '\n'.join([action.prompt_description() for action in self.actions.values()])
+
+class ReprocessDOMAction(ActionModel):
+    """Action to trigger DOM reprocessing"""
+    reprocess_dom: bool = True

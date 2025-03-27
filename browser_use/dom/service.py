@@ -3,20 +3,22 @@ import json
 import logging
 from dataclasses import dataclass
 from importlib import resources
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Any, Dict, List
 from urllib.parse import urlparse
+import asyncio
 
 if TYPE_CHECKING:
-	from playwright.async_api import Page
+	from playwright.async_api import Page, ElementHandle, Locator, Frame
 
 from browser_use.dom.views import (
 	DOMBaseNode,
 	DOMElementNode,
 	DOMState,
 	DOMTextNode,
+	ClickableElements,
 	SelectorMap,
 )
-from browser_use.utils import time_execution_async
+from browser_use.utils import time_execution_async, time_execution_sync
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +40,109 @@ class DomService:
 	@time_execution_async('--get_clickable_elements')
 	async def get_clickable_elements(
 		self,
-		highlight_elements: bool = True,
 		focus_element: int = -1,
-		viewport_expansion: int = 0,
-	) -> DOMState:
-		element_tree, selector_map = await self._build_dom_tree(highlight_elements, focus_element, viewport_expansion)
-		return DOMState(element_tree=element_tree, selector_map=selector_map)
+		viewport_expansion: int = 500,
+		highlight_elements: bool = True,
+	) -> ClickableElements:
+		"""Get all clickable elements from the page."""
+		# Add a delay to ensure page is fully loaded and scripts have run
+		await asyncio.sleep(0.5)
+		
+		# Force a DOM update to ensure elements are properly rendered
+		await self.page.evaluate("""() => {
+			// Force a reflow
+			document.body.offsetHeight;
+			// Force a repaint
+			window.getComputedStyle(document.body);
+		}""")
+		
+		# Get the DOM element tree
+		element_tree = await self._get_element_tree()
+		
+		# Highlight elements if requested
+		if highlight_elements:
+			await self._add_element_highlights(element_tree)
+		
+		# Create selector map
+		selector_map = {}
+		for node in element_tree.descendants():
+			if isinstance(node, DOMElementNode) and node.highlight_index is not None:
+				selector_map[node.highlight_index] = node
+		
+		logger.info(f"Created selector map with {len(selector_map)} elements")
+		
+		# Ensure we have elements in the selector map
+		if not selector_map and element_tree:
+			logger.warning("No elements in selector map - retrying with highlight indexing")
+			# Try re-indexing elements
+			await self._reindex_elements(element_tree)
+			
+			# Update selector map
+			selector_map = {}
+			for node in element_tree.descendants():
+				if isinstance(node, DOMElementNode) and node.highlight_index is not None:
+					selector_map[node.highlight_index] = node
+			
+			logger.info(f"Updated selector map with {len(selector_map)} elements after reindexing")
+		
+		return ClickableElements(element_tree=element_tree, selector_map=selector_map)
+
+	async def _reindex_elements(self, element_tree: DOMBaseNode) -> None:
+		"""Reindex elements to ensure they have highlight indices."""
+		index = 0
+		for node in element_tree.descendants():
+			if isinstance(node, DOMElementNode) and self._is_interactable(node):
+				node.highlight_index = index
+				index += 1
+				
+		# Try to apply highlights to the page
+		try:
+			elements_with_index = [node for node in element_tree.descendants() 
+							  if isinstance(node, DOMElementNode) and node.highlight_index is not None]
+			
+			for node in elements_with_index:
+				await self._highlight_element(node)
+		except Exception as e:
+			logger.warning(f"Error applying highlights during reindexing: {e}")
+
+	def _is_interactable(self, node: DOMElementNode) -> bool:
+		"""Check if an element is likely to be interactable."""
+		if not node.tag_name:
+			return False
+		
+		# Common interactable elements
+		interactable_tags = {
+			'a', 'button', 'input', 'select', 'textarea', 'option',
+			'label', 'form', 'details', 'summary', 'dialog', 
+		}
+		
+		# Elements that might be interactable based on attributes
+		potentially_interactable = {
+			'div', 'span', 'li', 'img', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'
+		}
+		
+		# Check if the element is directly interactable
+		if node.tag_name.lower() in interactable_tags:
+			return True
+		
+		# Check if the element has interactable attributes
+		if node.tag_name.lower() in potentially_interactable:
+			attrs = node.attributes
+			
+			# Check for click-related attributes
+			if any(attr in attrs for attr in ['onclick', 'role', 'tabindex']):
+				return True
+			
+			# Check for specific roles that indicate interactivity
+			if attrs.get('role') in ['button', 'link', 'checkbox', 'radio', 'menuitem', 'tab']:
+				return True
+			
+			# Check for specific classes that might indicate interactivity
+			classes = attrs.get('class', '').lower()
+			if any(cls in classes for cls in ['button', 'btn', 'link', 'clickable', 'selectable']):
+				return True
+		
+		return False
 
 	@time_execution_async('--get_cross_origin_iframes')
 	async def get_cross_origin_iframes(self) -> list[str]:

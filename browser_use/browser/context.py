@@ -593,10 +593,26 @@ class BrowserContext:
 
 		# Wait for page load
 		try:
+			# Wait for network to be idle
 			await self._wait_for_stable_network()
 
-			# Check if the loaded URL is allowed
+			# Wait for DOM to be ready
 			page = await self.get_current_page()
+			await page.wait_for_load_state('domcontentloaded')
+			await page.wait_for_load_state('load')
+			
+			# Wait for any dynamic content
+			await asyncio.sleep(0.5)  # Give time for dynamic content to load
+			
+			# Force a DOM update to ensure elements are indexed
+			await page.evaluate("""() => {
+				// Force a reflow
+				document.body.offsetHeight;
+				// Force a repaint
+				window.getComputedStyle(document.body);
+			}""")
+			
+			# Check if the loaded URL is allowed
 			await self._check_and_handle_navigation(page)
 		except URLNotAllowedError as e:
 			raise e
@@ -780,10 +796,16 @@ class BrowserContext:
 		structure = await page.evaluate(debug_script)
 		return structure
 
-	@time_execution_sync('--get_state')  # This decorator might need to be updated to handle async
+	@time_execution_sync('--get_state')
 	async def get_state(self) -> BrowserState:
 		"""Get the current state of the browser"""
+		# Wait for page to be fully loaded
 		await self._wait_for_page_and_frames_load()
+		
+		# Wait for network to be idle
+		await self._wait_for_stable_network()
+		
+		# Get session and update state
 		session = await self.get_session()
 		session.cached_state = await self._update_state()
 
@@ -794,71 +816,67 @@ class BrowserContext:
 		return session.cached_state
 
 	async def _update_state(self, focus_element: int = -1) -> BrowserState:
-		"""Update and return state."""
-		session = await self.get_session()
-
-		# Check if current page is still valid, if not switch to another available page
+		"""Update the browser state with current page info."""
 		try:
+			# Get current page
 			page = await self.get_current_page()
-			# Test if page is still accessible
-			await page.evaluate('1')
-		except Exception as e:
-			logger.debug(f'👋  Current page is no longer accessible: {str(e)}')
-			# Get all available pages
-			pages = session.context.pages
-			if pages:
-				self.state.target_id = None
-				page = await self._get_current_page(session)
-				logger.debug(f'🔄  Switched to page: {await page.title()}')
-			else:
-				raise BrowserError('Browser closed: no valid pages available')
-
-		try:
-			await self.remove_highlights()
-			dom_service = DomService(page)
-			content = await dom_service.get_clickable_elements(
-				focus_element=focus_element,
-				viewport_expansion=self.config.viewport_expansion,
-				highlight_elements=self.config.highlight_elements,
-			)
-
-			tabs_info = await self.get_tabs_info()
-
-			# Get all cross-origin iframes within the page and open them in new tabs
-			# mark the titles of the new tabs so the LLM knows to check them for additional content
-			# unfortunately too buggy for now, too many sites use invisible cross-origin iframes for ads, tracking, youtube videos, social media, etc.
-			# and it distracts the bot by openeing a lot of new tabs
-			# iframe_urls = await dom_service.get_cross_origin_iframes()
-			# for url in iframe_urls:
-			# 	if url in [tab.url for tab in tabs_info]:
-			# 		continue  # skip if the iframe if we already have it open in a tab
-			# 	new_page_id = tabs_info[-1].page_id + 1
-			# 	logger.debug(f'Opening cross-origin iframe in new tab #{new_page_id}: {url}')
-			# 	await self.create_new_tab(url)
-			# 	tabs_info.append(
-			# 		TabInfo(
-			# 			page_id=new_page_id,
-			# 			url=url,
-			# 			title=f'iFrame opened as new tab, treat as if embedded inside page #{self.state.target_id}: {page.url}',
-			# 			parent_page_id=self.state.target_id,
-			# 		)
-			# 	)
-
-			screenshot_b64 = await self.take_screenshot()
+			if not page:
+				raise Exception('No current page found')
+			
+			# Get URL and title
+			url = await page.url()
+			title = await page.title()
+			
+			# Get tabs
+			tabs = await self.get_tabs_info()
+			
+			# Create DomService and get clickable elements
+			try:
+				await self.remove_highlights()
+				dom_service = DomService(page)
+				content = await dom_service.get_clickable_elements(
+					focus_element=focus_element,
+					viewport_expansion=self.config.viewport_expansion,
+					highlight_elements=self.config.highlight_elements,
+				)
+				
+				# If no elements were indexed, retry with a fallback method
+				if not content.selector_map:
+					logger.warning("No elements in selector map, retrying with fallback method")
+					await asyncio.sleep(1.0)  # Wait longer
+					# Force a DOM update
+					await page.evaluate("""() => {
+						document.body.offsetHeight;
+						window.getComputedStyle(document.body);
+						// Force all images to load
+						const images = document.querySelectorAll('img');
+						images.forEach(img => { if(img.loading === 'lazy') img.loading = 'eager'; });
+					}""")
+					content = await dom_service.get_clickable_elements(
+						focus_element=focus_element,
+						viewport_expansion=self.config.viewport_expansion,
+						highlight_elements=self.config.highlight_elements,
+					)
+			except Exception as e:
+				logger.error(f"Error getting clickable elements: {e}")
+				raise
+			
+			# Get screenshot
+			screenshot = await self.take_screenshot()
+			
+			# Get pixels above/below viewport
 			pixels_above, pixels_below = await self.get_scroll_info(page)
-
-			self.current_state = BrowserState(
+			
+			return BrowserState(
+				url=url,
+				title=title,
+				tabs=tabs,
 				element_tree=content.element_tree,
 				selector_map=content.selector_map,
-				url=page.url,
-				title=await page.title(),
-				tabs=tabs_info,
-				screenshot=screenshot_b64,
+				screenshot=screenshot,
 				pixels_above=pixels_above,
 				pixels_below=pixels_below,
 			)
-
-			return self.current_state
 		except Exception as e:
 			logger.error(f'❌  Failed to update state: {str(e)}')
 			# Return last known good state if available

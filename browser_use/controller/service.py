@@ -31,6 +31,7 @@ from browser_use.controller.views import (
 	SendKeysAction,
 	SwitchTabAction,
 	UngroupTabsAction,
+	ReprocessDOMAction,
 )
 from browser_use.utils import time_execution_sync
 
@@ -47,6 +48,18 @@ class Controller(Generic[Context]):
 		output_model: Optional[Type[BaseModel]] = None,
 	):
 		self.registry = Registry[Context](exclude_actions)
+
+		# Register reprocess_dom action
+		@self.registry.action(
+			'Reprocess the DOM to update element indices',
+			param_model=ReprocessDOMAction,
+		)
+		async def reprocess_dom(params: ReprocessDOMAction, browser: BrowserContext):
+			# Force a DOM reprocessing by getting a new state
+			await browser.get_state()
+			msg = '🔄 Reprocessed DOM to update element indices'
+			logger.info(msg)
+			return ActionResult(extracted_content=msg, include_in_memory=True)
 
 		"""Register all default browser actions"""
 
